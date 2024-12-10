@@ -3,125 +3,91 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
+import json
 import re
 
-def clean_text(text):
-    """Clean extracted text by removing extra spaces and newlines"""
-    if text:
-        return ' '.join(text.strip().split())
-    return "Not found"
-
-def extract_number(text):
-    """Extract numeric values from text"""
-    if text:
-        numbers = re.findall(r'[\d,.]+', text)
-        if numbers:
-            return numbers[0].replace(',', '')
-    return "0"
-
 def extract_aurora_data(link):
-    """Extract data from Aurora proposal"""
     try:
+        # Setup headers to mimic a browser
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/json',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://v2.aurorasolar.com/',
+            'Origin': 'https://v2.aurorasolar.com'
         }
+        
+        # Extract proposal ID
+        proposal_id = link.split('/')[-1]
+        
+        # Try the API endpoint first
+        api_url = f"https://v2.aurorasolar.com/api/v2/proposals/{proposal_id}"
+        response = requests.get(api_url, headers=headers)
+        
+        # Debug information
+        st.write("Attempting to fetch data...")
+        st.write(f"API Response Code: {response.status_code}")
+        
+        if response.status_code == 200:
+            try:
+                data = response.json()
+                st.write("Successfully retrieved JSON data")
+                return {
+                    'Date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'Client Name': data.get('customer', {}).get('name', 'Not found'),
+                    'System Size': f"{data.get('system', {}).get('size_kw', 0)} kW",
+                    'Price per Watt': f"${data.get('pricing', {}).get('price_per_watt', 0):.2f}",
+                    'Total Cost': f"${data.get('pricing', {}).get('total_cost', 0):,.2f}",
+                    'Link': link
+                }
+            except json.JSONDecodeError:
+                st.write("Could not parse JSON response")
+        
+        # Fallback to HTML scraping
         response = requests.get(link, headers=headers)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Debug info
-        st.write("Attempting to extract data...")
+        # Look for data in script tags
+        scripts = soup.find_all('script')
+        data_script = None
+        for script in scripts:
+            if script.string and ('__INITIAL_STATE__' in script.string or 'window.PROPOSAL_DATA' in script.string):
+                data_script = script.string
+                break
         
-        # Extract client name (trying multiple possible selectors)
-        name_elements = [
-            soup.find('h1', {'class': 'customer-name'}),
-            soup.find('div', {'class': 'customer-info'}),
-            soup.find('div', text=re.compile('Dear.*')),
-        ]
-        client_name = next((clean_text(elem.text) for elem in name_elements if elem), "Not found")
+        if data_script:
+            # Try to extract JSON data
+            try:
+                json_str = re.search(r'({.*})', data_script).group(1)
+                data = json.loads(json_str)
+                st.write("Found data in script tag")
+                return {
+                    'Date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'Client Name': data.get('customer', {}).get('name', 'Not found'),
+                    'System Size': f"{data.get('system', {}).get('size_kw', 0)} kW",
+                    'Price per Watt': f"${data.get('pricing', {}).get('price_per_watt', 0):.2f}",
+                    'Total Cost': f"${data.get('pricing', {}).get('total_cost', 0):,.2f}",
+                    'Link': link
+                }
+            except Exception as e:
+                st.write(f"Error parsing script data: {str(e)}")
         
-        # Extract system size
-        system_size_elements = [
-            soup.find('div', text=re.compile('.*kW.*')),
-            soup.find('span', text=re.compile('.*kW.*')),
-        ]
-        system_size = next((clean_text(elem.text) for elem in system_size_elements if elem), "Not found")
+        # If all else fails, try direct HTML elements
+        client_name = soup.find('p', {'class': re.compile('.*customer-name.*')})
+        system_size = soup.find(string=re.compile(r'.*kW.*'))
+        price = soup.find(string=re.compile(r'\$[\d,]+\.?\d*'))
         
-        # Extract price data
-        price_elements = [
-            soup.find('div', text=re.compile('\$.*')),
-            soup.find('span', text=re.compile('\$.*')),
-        ]
-        total_cost = next((clean_text(elem.text) for elem in price_elements if elem), "Not found")
-        
-        # Debug the HTML structure (in development mode)
-        if st.checkbox("Show HTML Structure (Debug)"):
-            st.code(soup.prettify())
-        
-        data = {
+        return {
             'Date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'Client Name': client_name,
-            'System Size': system_size,
-            'Price per Watt': "Calculating...",  # Will add calculation
-            'Total Cost': total_cost,
+            'Client Name': client_name.text if client_name else "Not found",
+            'System Size': system_size if system_size else "Not found",
+            'Price per Watt': "Not found",
+            'Total Cost': price if price else "Not found",
             'Link': link
         }
         
-        # Show extraction details
-        st.write("Extracted Data Details:")
-        for key, value in data.items():
-            st.write(f"{key}: {value}")
-            
-        return data
-        
     except Exception as e:
-        st.error(f"Extraction error: {str(e)}")
-        st.write("Response Status:", response.status_code if 'response' in locals() else "No response")
+        st.error(f"Error during extraction: {str(e)}")
         return None
 
-st.set_page_config(page_title="Aurora Proposal Data Extractor", layout="wide")
-
-if 'data' not in st.session_state:
-    st.session_state.data = pd.DataFrame()
-
-st.title("☀️ Aurora Proposal Data Extractor")
-st.write("Extract proposal data from Aurora Solar")
-
-link = st.text_input("Paste Aurora Proposal Link:")
-
-if st.button("Process Link", type="primary"):
-    try:
-        with st.spinner("Processing proposal..."):
-            data = extract_aurora_data(link)
-            if data:
-                new_df = pd.DataFrame([data])
-                if st.session_state.data.empty:
-                    st.session_state.data = new_df
-                else:
-                    st.session_state.data = pd.concat([st.session_state.data, new_df], ignore_index=True)
-                st.success("✅ Data extracted successfully!")
-            else:
-                st.error("Failed to extract data")
-    except Exception as e:
-        st.error(f"❌ Error: {str(e)}")
-
-if not st.session_state.data.empty:
-    st.subheader("Extracted Data")
-    st.dataframe(st.session_state.data)
-    
-    csv = st.session_state.data.to_csv(index=False)
-    st.download_button(
-        label="Download CSV",
-        data=csv,
-        file_name="aurora_data.csv",
-        mime="text/csv"
-    )
-
-# Add debug section
-with st.expander("Debug Information"):
-    st.write("If you're having issues, check here for more details")
-    if st.button("Test Connection"):
-        try:
-            response = requests.get("https://v2.aurorasolar.com")
-            st.write(f"Connection Status: {response.status_code}")
-        except Exception as e:
-            st.write(f"Connection Error: {str(e)}")
+# Rest of your Streamlit interface code remains the same
