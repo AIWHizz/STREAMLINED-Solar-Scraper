@@ -89,5 +89,3 @@ def extract_aurora_data(link):
     except Exception as e:
         st.error(f"Error during extraction: {str(e)}")
         return None
-
-# Rest of your Streamlit interface code remains the same
